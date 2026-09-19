@@ -6,9 +6,11 @@ import com.codeinterview.dto.WebSocketMessage;
 import com.codeinterview.model.CandidateInvitation;
 import com.codeinterview.model.InterviewRoom;
 import com.codeinterview.model.ParticipantStatus;
+import com.codeinterview.model.Problem;
 import com.codeinterview.repository.CandidateInvitationRepository;
 import com.codeinterview.repository.InterviewRoomRepository;
 import com.codeinterview.repository.ParticipantStatusRepository;
+import com.codeinterview.repository.ProblemRepository;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.http.HttpStatus;
@@ -37,6 +39,9 @@ public class InterviewRoomController {
     private ParticipantStatusRepository participantStatusRepository;
 
     @Autowired
+    private ProblemRepository problemRepository;
+
+    @Autowired
     private SimpMessagingTemplate messagingTemplate;
 
     private static final String ROOM_CODE_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
@@ -44,11 +49,30 @@ public class InterviewRoomController {
 
     @PostMapping
     @Transactional
-    public ResponseEntity<CreateRoomResponse> createInterviewRoom(@RequestBody Map<String, String> request) {
+    public ResponseEntity<?> createInterviewRoom(@RequestBody Map<String, String> request) {
         String title = request.get("title");
         String problemId = request.get("problemId");
         String interviewerId = request.get("interviewerId");
         String interviewerName = request.get("interviewerName");
+
+        // 空白输入按未填写处理
+        if (title == null || title.trim().isEmpty()
+                || interviewerName == null || interviewerName.trim().isEmpty()
+                || problemId == null || problemId.trim().isEmpty()) {
+            return new ResponseEntity<>(Map.of("message", "房间标题、面试官姓名和题目均为必填项"),
+                    HttpStatus.BAD_REQUEST);
+        }
+
+        title = title.trim();
+        interviewerName = interviewerName.trim();
+        problemId = problemId.trim();
+
+        // 题目必须存在且有效，避免创建引用已删除题目的房间
+        Optional<Problem> problemOpt = problemRepository.findById(problemId);
+        if (problemOpt.isEmpty()) {
+            return new ResponseEntity<>(Map.of("message", "所选题目不存在或已被删除，请重新选择题目"),
+                    HttpStatus.BAD_REQUEST);
+        }
 
         InterviewRoom room = new InterviewRoom();
         room.setTitle(title);
