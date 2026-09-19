@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { createRoom } from '../services/interviewRoomService';
 import { getProblems } from '../services/problemService';
 import type { InterviewRoom, CreateRoomRequest, CreateRoomResponse, User, Problem } from '../types';
@@ -14,7 +14,7 @@ interface CreateRoomModalProps {
 
 export const CreateRoomModal: React.FC<CreateRoomModalProps> = ({ isOpen, onClose, onSuccess }) => {
   const { currentUser, setMyRooms, myRooms, setCurrentUser, problems, setProblems } = useInterviewStore();
-  const { error: showError, info, success } = useToastStore();
+  const { error: showError, success } = useToastStore();
   const [title, setTitle] = useState('');
   const [problemId, setProblemId] = useState('');
   const [interviewerName, setInterviewerName] = useState('');
@@ -26,30 +26,53 @@ export const CreateRoomModal: React.FC<CreateRoomModalProps> = ({ isOpen, onClos
   const [selectedProblem, setSelectedProblem] = useState<Problem | null>(null);
   const [showProblemList, setShowProblemList] = useState(false);
 
-  useEffect(() => {
-    if (isOpen && problems.length === 0) {
-      loadProblems();
-    }
-  }, [isOpen]);
+  const resetForm = useCallback(() => {
+    setTitle('');
+    setProblemId('');
+    setInterviewerName('');
+    setError('');
+    setDifficultyFilter('all');
+    setProblemSearch('');
+    setSelectedProblem(null);
+    setShowProblemList(false);
+  }, []);
 
-  useEffect(() => {
-    const problem = problems.find(p => p.id === problemId);
-    setSelectedProblem(problem || null);
-  }, [problemId, problems]);
-
-  const loadProblems = async () => {
+  const loadProblems = useCallback(async () => {
     setProblemsLoading(true);
     try {
       const data = await getProblems();
       setProblems(data);
-      info(`已加载 ${data.length} 道题目供选择`);
     } catch (err) {
       console.error('Failed to load problems:', err);
       showError('加载题目列表失败，请稍后重试');
     } finally {
       setProblemsLoading(false);
     }
-  };
+  }, [setProblems, showError]);
+
+  // 每次打开都重置为一次全新的填写，并刷新题目列表，避免残留上次的筛选/输入和已被删除的题目
+  useEffect(() => {
+    if (isOpen) {
+      resetForm();
+      loadProblems();
+    }
+  }, [isOpen, resetForm, loadProblems]);
+
+  // problemId 对应的题目可能已被删除：同步 selectedProblem，是否失效交由 isProblemInvalid 判断
+  useEffect(() => {
+    if (!problemId) {
+      setSelectedProblem(null);
+      return;
+    }
+    const problem = problems.find(p => p.id === problemId);
+    setSelectedProblem(problem || null);
+  }, [problemId, problems]);
+
+  const trimmedTitle = title.trim();
+  const trimmedInterviewerName = interviewerName.trim();
+  // 已选择题目，但最新列表中找不到（列表加载完成后）说明题目已失效，需要重选
+  const isProblemInvalid = !!problemId && !problemsLoading && !selectedProblem;
+  const canSubmit = !!trimmedTitle && !!trimmedInterviewerName && !!problemId && !isProblemInvalid && !problemsLoading;
 
   const filteredProblems = problems.filter(p => {
     const matchesDifficulty = difficultyFilter === 'all' || p.difficulty === difficultyFilter;
@@ -61,23 +84,37 @@ export const CreateRoomModal: React.FC<CreateRoomModalProps> = ({ isOpen, onClos
 
   const handleSelectProblem = (problem: Problem) => {
     setProblemId(problem.id);
+    setError('');
     setShowProblemList(false);
+  };
+
+  const handleClearProblem = () => {
+    setProblemId('');
+    setSelectedProblem(null);
+    setError('');
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!title || !problemId || !interviewerName) {
-      setError('请填写所有必填字段');
+    // 空白输入按未填写处理
+    if (!trimmedTitle || !trimmedInterviewerName) {
+      setError('请填写房间标题和面试官姓名（不能为空白）');
+      return;
+    }
+    // 提交前明确拦截失效题目，避免请求带着已删除的题目 ID 发出后反复报错
+    if (!problemId || isProblemInvalid) {
+      setError('选择的题目已失效，请重新选择一道题目');
       return;
     }
     setLoading(true);
     setError('');
+    // 失败重试时保留当前已填写的有效内容
     try {
       const requestData: CreateRoomRequest = {
-        title,
+        title: trimmedTitle,
         problemId,
         interviewerId: currentUser?.id || 'interviewer-001',
-        interviewerName,
+        interviewerName: trimmedInterviewerName,
       };
       const result: CreateRoomResponse = await createRoom(requestData);
       const user: User = {
@@ -89,18 +126,14 @@ export const CreateRoomModal: React.FC<CreateRoomModalProps> = ({ isOpen, onClos
       };
       setCurrentUser(user);
       setMyRooms([result.room, ...myRooms]);
-      success(`面试房间「${title}」创建成功！房间码：${result.room.roomCode}`);
+      success(`面试房间「${trimmedTitle}」创建成功！房间码：${result.room.roomCode}`);
+      // 成功后清理本次选择
+      resetForm();
       onSuccess(result.room);
       onClose();
-      setTitle('');
-      setProblemId('');
-      setInterviewerName('');
-      setDifficultyFilter('all');
-      setProblemSearch('');
-      setSelectedProblem(null);
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : '创建房间失败';
-      setError(errorMessage);
+      setError(errorMessage + '，已保留您填写的内容，修改后可重试');
       showError(errorMessage);
     } finally {
       setLoading(false);
@@ -135,7 +168,7 @@ export const CreateRoomModal: React.FC<CreateRoomModalProps> = ({ isOpen, onClos
               <input
                 type="text"
                 value={title}
-                onChange={e => setTitle(e.target.value)}
+                onChange={e => { setTitle(e.target.value); setError(''); }}
                 placeholder="请输入房间标题，如：前端开发工程师一面"
                 style={inputStyle}
               />
@@ -146,7 +179,7 @@ export const CreateRoomModal: React.FC<CreateRoomModalProps> = ({ isOpen, onClos
               <input
                 type="text"
                 value={interviewerName}
-                onChange={e => setInterviewerName(e.target.value)}
+                onChange={e => { setInterviewerName(e.target.value); setError(''); }}
                 placeholder="请输入面试官姓名"
                 style={inputStyle}
               />
@@ -156,9 +189,43 @@ export const CreateRoomModal: React.FC<CreateRoomModalProps> = ({ isOpen, onClos
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}>
                 <label style={{ color: '#ccc', fontSize: '14px' }}>选择面试题目 *</label>
                 <span style={{ color: '#666', fontSize: '12px' }}>
-                  {problems.length} 道题目可用
+                  {problemsLoading ? '题目加载中...' : `${problems.length} 道题目可用`}
                 </span>
               </div>
+
+              {isProblemInvalid && (
+                <div style={{
+                  marginBottom: '8px',
+                  padding: '8px 12px',
+                  background: 'rgba(244,67,54,0.1)',
+                  border: '1px solid rgba(244,67,54,0.4)',
+                  borderRadius: '4px',
+                  color: '#f44336',
+                  fontSize: '13px',
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  gap: '8px',
+                }}>
+                  <span>⚠️ 之前选择的题目已被删除或失效，请重新选择一道题目</span>
+                  <button
+                    type="button"
+                    onClick={handleClearProblem}
+                    style={{
+                      background: 'rgba(244,67,54,0.2)',
+                      border: '1px solid rgba(244,67,54,0.5)',
+                      color: '#f44336',
+                      borderRadius: '4px',
+                      padding: '3px 10px',
+                      cursor: 'pointer',
+                      fontSize: '12px',
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    重新选择
+                  </button>
+                </div>
+              )}
 
               <div
                 onClick={() => setShowProblemList(!showProblemList)}
@@ -169,9 +236,12 @@ export const CreateRoomModal: React.FC<CreateRoomModalProps> = ({ isOpen, onClos
                   justifyContent: 'space-between',
                   alignItems: 'center',
                   minHeight: '44px',
+                  borderColor: isProblemInvalid ? '#f44336' : '#555',
                 }}
               >
-                {selectedProblem ? (
+                {isProblemInvalid ? (
+                  <span style={{ color: '#f44336' }}>题目已失效，请重新选择</span>
+                ) : selectedProblem ? (
                   <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
                     <span style={{ color: '#fff' }}>{selectedProblem.title}</span>
                     <span style={{
@@ -356,8 +426,8 @@ export const CreateRoomModal: React.FC<CreateRoomModalProps> = ({ isOpen, onClos
             </button>
             <button
               type="submit"
-              disabled={loading || !problemId}
-              style={{ padding: '10px 24px', borderRadius: '4px', border: 'none', background: '#4caf50', color: '#fff', cursor: (loading || !problemId) ? 'not-allowed' : 'pointer', fontSize: '14px', opacity: (loading || !problemId) ? 0.5 : 1 }}
+              disabled={loading || !canSubmit}
+              style={{ padding: '10px 24px', borderRadius: '4px', border: 'none', background: '#4caf50', color: '#fff', cursor: (loading || !canSubmit) ? 'not-allowed' : 'pointer', fontSize: '14px', opacity: (loading || !canSubmit) ? 0.5 : 1 }}
             >
               {loading ? '创建中...' : '创建房间'}
             </button>
